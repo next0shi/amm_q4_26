@@ -1,4 +1,5 @@
 [toolchain]
+anchor_version = "0.31.1"
 
 [features]
 resolution = true
@@ -12,6 +13,6 @@ cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "cargo test"
+test = "cargo test -p amm_q4_26"
 
 [hooks]
