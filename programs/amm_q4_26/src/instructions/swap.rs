@@ -4,7 +4,7 @@ use anchor_spl::{
     token::{transfer, Mint, Token, TokenAccount, Transfer},
 };
 
-use crate::{error::AmmError, state::Config};
+use crate::{curve, error::AmmError, state::Config};
 
 #[derive(Accounts)]
 pub struct Swap<'info> {
@@ -53,26 +53,6 @@ pub struct Swap<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/// Constant-product output: out = reserve_out * in / (reserve_in + in), rounded down.
-pub fn swap_out(reserve_in: u64, reserve_out: u64, amount_in: u64) -> Result<u64> {
-    let num = (reserve_out as u128)
-        .checked_mul(amount_in as u128)
-        .ok_or(AmmError::Overflow)?;
-    let den = (reserve_in as u128)
-        .checked_add(amount_in as u128)
-        .ok_or(AmmError::Overflow)?;
-    let out = num.checked_div(den).ok_or(AmmError::Overflow)?;
-    u64::try_from(out).map_err(|_| AmmError::Overflow.into())
-}
-
-fn bps(amount: u64, rate: u16) -> Result<u64> {
-    let v = (amount as u128)
-        .checked_mul(rate as u128)
-        .ok_or(AmmError::Overflow)?
-        / 10_000u128;
-    u64::try_from(v).map_err(|_| AmmError::Overflow.into())
-}
-
 impl<'info> Swap<'info> {
     /// `is_x == true`: the user pays X and receives Y.
     pub fn swap(&mut self, is_x: bool, amount_in: u64, min_out: u64) -> Result<()> {
@@ -86,16 +66,17 @@ impl<'info> Swap<'info> {
         };
         require!(reserve_in > 0 && reserve_out > 0, AmmError::EmptyPool);
 
-        // 1) protocol fee: cut taken off the top, goes to the treasury
-        let protocol_cut = bps(amount_in, self.config.protocol_fee)?;
-        let net_in = amount_in.checked_sub(protocol_cut).ok_or(AmmError::Overflow)?;
+        // 1) protocol fee: taken off the top, goes to the treasury
+        let (protocol_cut, net_in) =
+            curve::take_fee(amount_in, self.config.protocol_fee).ok_or(AmmError::Overflow)?;
 
         // 2) LP fee: stays in the vault but is NOT fed to the curve, so k grows
-        let lp_fee = bps(net_in, self.config.fee)?;
-        let in_for_curve = net_in.checked_sub(lp_fee).ok_or(AmmError::Overflow)?;
+        let (_lp_fee, in_for_curve) =
+            curve::take_fee(net_in, self.config.fee).ok_or(AmmError::Overflow)?;
 
-        // 3) curve decides how much the user gets
-        let out = swap_out(reserve_in, reserve_out, in_for_curve)?;
+        // 3) the curve decides how much the user gets
+        let out =
+            curve::amount_out(reserve_in, reserve_out, in_for_curve).ok_or(AmmError::Overflow)?;
         require!(out > 0, AmmError::ZeroAmount);
         require!(out >= min_out, AmmError::SlippageExceeded);
 
